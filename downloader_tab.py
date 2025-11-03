@@ -900,30 +900,12 @@ class DownloaderTab(ctk.CTkFrame):
 
     # --- KẾT THÚC CÁC HÀM QUẢN LÝ LIST LINK ---
 
-    # def _get_download_format(self):
-    #     quality = self.quality_var.get()
-    #     if quality == "Best": return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
-    #     resolutions = {"4K": "2160", "2K": "1440", "1080p": "1080", "720p": "720"}
-    #     height = resolutions.get(quality, "1080")
-    #     return f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}][ext=mp4]/best[ext=mp4]/best'
-
     def _get_download_format(self):
-        """
-        Tạo chuỗi định dạng linh hoạt hơn cho yt-dlp để tránh lỗi "format not available".
-        Hàm này sẽ ưu tiên chất lượng tốt nhất, bất kể container (mp4/webm),
-        và dựa vào 'merge_output_format' để có được file mp4 cuối cùng.
-        """
         quality = self.quality_var.get()
-        # Chuỗi định dạng chung: tải video tốt nhất + audio tốt nhất, sau đó fallback về file gộp sẵn tốt nhất.
-        base_format = 'bestvideo+bestaudio/best'
-
-        if quality == "Best":
-            return base_format
-
+        if quality == "Best": return 'bestvideo[ext=mp4]+bestaudio[ext=m4a]/best[ext=mp4]/best'
         resolutions = {"4K": "2160", "2K": "1440", "1080p": "1080", "720p": "720"}
         height = resolutions.get(quality, "1080")
-        # Thêm điều kiện về chiều cao vào chuỗi định dạng chung.
-        return f'bestvideo[height<={height}]+bestaudio/best[height<={height}]'
+        return f'bestvideo[height<={height}][ext=mp4]+bestaudio[ext=m4a]/best[height<={height}][ext=mp4]/best[ext=mp4]/best'
     
     def _start_scan(self):
         if self.scan_process and self.scan_process.is_alive():
