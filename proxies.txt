@@ -1,0 +1,3 @@
+# Định dạng: IP:port hoặc IP:port:user:pass (mỗi proxy một dòng)
+# Ví dụ: 127.0.0.1:8080
+# Ví dụ: 192.168.1.1:1080:myuser:mypass

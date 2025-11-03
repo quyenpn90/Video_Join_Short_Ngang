@@ -1,0 +1,349 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Module cho Tab Quản lý Kênh YouTube và TikTok (Phiên bản chuyên nghiệp).
+Cơ chế tải tức thì, đồng bộ ngầm, hỗ trợ cookie và giao diện quản lý tổng quan.
+"""
+
+import customtkinter as ctk
+from tkinter import ttk, messagebox, filedialog, Menu # SỬA LỖI: Import Menu từ tkinter
+import json
+import threading
+from pathlib import Path
+from datetime import datetime, timedelta
+import queue
+import sys
+import os
+import subprocess
+import webbrowser
+
+try:
+    import yt_dlp
+    from PIL import Image, ImageTk
+    import requests
+    from io import BytesIO
+    YT_DLP_AVAILABLE = True
+except ImportError:
+    YT_DLP_AVAILABLE = False
+
+MANAGER_DATA_FILE = Path.cwd() / "channel_manager_data.json"
+
+def format_number(n):
+    if n is None: return "N/A"
+    try:
+        n = int(n)
+        if n >= 1_000_000_000: return f"{n / 1_000_000_000:.2f} B"
+        if n >= 1_000_000: return f"{n / 1_000_000:.2f} M"
+        if n >= 1_000: return f"{n / 1_000:.1f} K"
+        return str(n)
+    except (ValueError, TypeError): return "N/A"
+
+class ManageChannelTab(ctk.CTkFrame):
+    def __init__(self, master, **kwargs):
+        super().__init__(master, **kwargs)
+        self.grid_columnconfigure(0, weight=1); self.grid_rowconfigure(1, weight=1)
+        self.ui_queue = queue.Queue(); self.manager_map = {}; self.channel_data_cache = {}
+        self.channel_thumbnails = {}; self.video_thumbnails = {}
+        self.create_widgets()
+        self.load_channels_from_file()
+        self.after(100, self.process_ui_queue)
+
+    def log_message(self, msg): self.ui_queue.put(("log", msg))
+
+    def process_ui_queue(self):
+        try:
+            for _ in range(100):
+                if self.ui_queue.empty(): break
+                msg_type, data = self.ui_queue.get_nowait()
+                if msg_type == "log":
+                    self.log_textbox.configure(state="normal"); self.log_textbox.insert("end", data + "\n")
+                    self.log_textbox.configure(state="disabled"); self.log_textbox.see("end")
+                elif msg_type == "update_channel_row":
+                    iid, values, image = data
+                    if self.channel_tree.exists(iid):
+                        if image:
+                            self.channel_thumbnails[iid] = image
+                            self.channel_tree.item(iid, values=values, image=image)
+                        else: self.channel_tree.item(iid, values=values)
+                elif msg_type == "scan_finished":
+                    self.load_button.configure(state="normal", text="Tải Dữ Liệu Toàn Bộ")
+                    self.log_message("✅ Đã hoàn tất chu trình tải dữ liệu!")
+                elif msg_type == "populate_video_placeholders": self._populate_video_list_placeholders(data)
+                elif msg_type == "update_video_row":
+                    iid, values, image = data
+                    if self.video_tree.exists(iid):
+                        if image: self.video_thumbnails[iid] = image
+                        self.video_tree.item(iid, values=values, image=image)
+        except queue.Empty: pass
+        finally: self.after(100, self.process_ui_queue)
+
+    def create_widgets(self):
+        control_frame = ctk.CTkFrame(self)
+        control_frame.grid(row=0, column=0, padx=10, pady=10, sticky="ew")
+        control_frame.grid_columnconfigure(6, weight=1)
+        ctk.CTkLabel(control_frame, text="Người Quản Lý:").grid(row=0, column=0, padx=(10, 5), pady=10)
+        self.manager_var = ctk.StringVar(value="[Tất cả]")
+        self.manager_menu = ctk.CTkOptionMenu(control_frame, variable=self.manager_var, command=self.load_channels_from_file)
+        self.manager_menu.grid(row=0, column=1, padx=5, pady=10)
+        self.load_button = ctk.CTkButton(control_frame, text="Tải Dữ Liệu Toàn Bộ", command=self.start_scan_all_channels)
+        self.load_button.grid(row=0, column=2, padx=5, pady=10)
+        
+        ctk.CTkLabel(control_frame, text="Cookie File:").grid(row=0, column=3, padx=(15, 5), pady=10)
+        self.cookie_path_var = ctk.StringVar(value="cookies.txt")
+        self.cookie_entry = ctk.CTkEntry(control_frame, textvariable=self.cookie_path_var)
+        self.cookie_entry.grid(row=0, column=4, padx=5, pady=10, sticky="ew")
+        self.use_cookie_var = ctk.BooleanVar(value=True)
+        self.cookie_checkbox = ctk.CTkCheckBox(control_frame, text="Sử dụng", variable=self.use_cookie_var)
+        self.cookie_checkbox.grid(row=0, column=5, padx=5, pady=10)
+        
+        ctk.CTkButton(control_frame, text="Sửa List Kênh...", command=self.open_manager_file).grid(row=0, column=7, padx=5, pady=10)
+
+        main_pane = ctk.CTkFrame(self)
+        main_pane.grid(row=1, column=0, padx=10, pady=0, sticky="nsew")
+        main_pane.grid_columnconfigure(0, weight=3); main_pane.grid_columnconfigure(1, weight=4); main_pane.grid_rowconfigure(0, weight=1)
+        channel_list_frame = ctk.CTkFrame(main_pane)
+        channel_list_frame.grid(row=0, column=0, padx=(0, 5), pady=0, sticky="nsew")
+        channel_list_frame.grid_rowconfigure(1, weight=1); channel_list_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(channel_list_frame, text="Hệ Thống Kênh (Chuột phải để tải lại)", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+
+        style = ttk.Style()
+        style.theme_use("default")
+        bg_color=self._apply_appearance_mode(ctk.ThemeManager.theme["CTkFrame"]["fg_color"]); text_color=self._apply_appearance_mode(ctk.ThemeManager.theme["CTkLabel"]["text_color"]); header_bg=self._apply_appearance_mode(ctk.ThemeManager.theme["CTkButton"]["fg_color"])
+        active_color = self._apply_appearance_mode(ctk.ThemeManager.theme["CTkButton"]["hover_color"])
+        
+        style.configure("Channel.Treeview", background=bg_color, foreground=text_color, fieldbackground=bg_color, borderwidth=0, rowheight=65)
+        style.map('Channel.Treeview', background=[('selected', active_color)])
+        style.configure("Channel.Treeview.Heading", background=header_bg, foreground=text_color, relief="flat", font=('Segoe UI', 10, 'bold'))
+        style.map("Channel.Treeview.Heading", background=[('active', active_color)])
+
+        channel_cols = ('thumbnail', 'channel_name', 'status', 'platform', 'category', 'subs', 'likes', 'total_videos', 'uploaded_yesterday')
+        self.channel_tree = ttk.Treeview(channel_list_frame, columns=channel_cols, show='headings', style="Channel.Treeview")
+        self.channel_tree.heading('thumbnail', text='Avatar'); self.channel_tree.column('thumbnail', width=80, anchor='center')
+        self.channel_tree.heading('channel_name', text='Tên Kênh'); self.channel_tree.column('channel_name', width=180, stretch=True)
+        self.channel_tree.heading('status', text='Trạng thái'); self.channel_tree.column('status', width=100, anchor='center')
+        self.channel_tree.heading('platform', text='Nền tảng'); self.channel_tree.column('platform', width=80, anchor='center')
+        self.channel_tree.heading('category', text='Thể loại'); self.channel_tree.column('category', width=100, anchor='center')
+        self.channel_tree.heading('subs', text='Sub / Follow'); self.channel_tree.column('subs', width=110, anchor='e')
+        self.channel_tree.heading('likes', text='Likes Kênh'); self.channel_tree.column('likes', width=100, anchor='e')
+        self.channel_tree.heading('total_videos', text='Videos'); self.channel_tree.column('total_videos', width=70, anchor='center')
+        self.channel_tree.heading('uploaded_yesterday', text='Up Hôm Qua'); self.channel_tree.column('uploaded_yesterday', width=90, anchor='center')
+        self.channel_tree.grid(row=1, column=0, sticky="nsew")
+        channel_scroll = ctk.CTkScrollbar(channel_list_frame, command=self.channel_tree.yview); channel_scroll.grid(row=1, column=1, sticky='ns')
+        self.channel_tree.configure(yscrollcommand=channel_scroll.set)
+        self.channel_tree.bind('<<TreeviewSelect>>', self.on_channel_select)
+        self.channel_tree.bind('<Double-1>', self._on_channel_double_click)
+        
+        # SỬA LỖI: Sử dụng tkinter.Menu thay vì ctk.CTkMenu và tùy chỉnh giao diện
+        self.channel_context_menu = Menu(self, tearoff=0, background=bg_color, fg=text_color, activebackground=active_color, activeforeground=text_color, relief='flat', borderwidth=0)
+        self.channel_context_menu.add_command(label="Tải lại dữ liệu kênh này", command=self.refresh_selected_channel)
+        
+        self.channel_tree.bind('<Button-3>', self.show_channel_context_menu)
+
+        video_detail_frame = ctk.CTkFrame(main_pane)
+        video_detail_frame.grid(row=0, column=1, padx=(5, 0), pady=0, sticky="nsew")
+        video_detail_frame.grid_rowconfigure(1, weight=1); video_detail_frame.grid_columnconfigure(0, weight=1)
+        ctk.CTkLabel(video_detail_frame, text="Top Video Nhiều View Nhất", font=ctk.CTkFont(size=14, weight="bold")).grid(row=0, column=0, padx=10, pady=5, sticky="w")
+        style.configure("Video.Treeview", background=bg_color, foreground=text_color, fieldbackground=bg_color, borderwidth=0, rowheight=72)
+        style.map('Video.Treeview', background=[('selected', active_color)])
+        style.configure("Video.Treeview.Heading", background=header_bg, foreground=text_color, relief="flat", font=('Segoe UI', 10, 'bold'))
+        style.map("Video.Treeview.Heading", background=[('active', active_color)])
+        video_cols = ('thumbnail', 'title', 'views', 'upload_date', 'duration', 'likes')
+        self.video_tree = ttk.Treeview(video_detail_frame, columns=video_cols, show='headings', style="Video.Treeview")
+        self.video_tree.heading('thumbnail', text='Thumbnail'); self.video_tree.column('thumbnail', width=160, anchor='center')
+        self.video_tree.heading('title', text='Tiêu đề'); self.video_tree.column('title', width=300, stretch=True)
+        self.video_tree.heading('views', text='Lượt xem'); self.video_tree.column('views', width=100, anchor='e')
+        self.video_tree.heading('upload_date', text='Ngày đăng'); self.video_tree.column('upload_date', width=100, anchor='center')
+        self.video_tree.heading('duration', text='Thời lượng'); self.video_tree.column('duration', width=80, anchor='center')
+        self.video_tree.heading('likes', text='Thích'); self.video_tree.column('likes', width=80, anchor='e')
+        self.video_tree.grid(row=1, column=0, sticky="nsew")
+        video_scroll = ctk.CTkScrollbar(video_detail_frame, command=self.video_tree.yview); video_scroll.grid(row=1, column=1, sticky='ns')
+        self.video_tree.configure(yscrollcommand=video_scroll.set)
+
+        self.log_textbox = ctk.CTkTextbox(self, state="disabled", height=120, font=("Courier New", 11))
+        self.log_textbox.grid(row=2, column=0, padx=10, pady=10, sticky="ew")
+
+    def show_channel_context_menu(self, event):
+        iid = self.channel_tree.identify_row(event.y)
+        if iid:
+            self.channel_tree.selection_set(iid)
+            self.channel_context_menu.post(event.x_root, event.y_root)
+
+    def _on_channel_double_click(self, event):
+        item_id = self.channel_tree.focus()
+        if not item_id or item_id not in self.channel_data_cache: return
+        channel_info = self.channel_data_cache[item_id]
+        if 'webpage_url' in channel_info:
+            url = channel_info['webpage_url']
+            self.log_message(f"INFO: Đang mở kênh: {url}")
+            try: webbrowser.open(url, new=2)
+            except Exception as e: self.log_message(f"ERROR: Không thể mở trình duyệt: {e}")
+
+    def load_channels_from_file(self, selected_manager=None):
+        try:
+            if not MANAGER_DATA_FILE.exists():
+                default_data = { "Youtube_AI": [{ "url": "...", "category": "..." }] }
+                with open(MANAGER_DATA_FILE, 'w', encoding='utf-8') as f: json.dump(default_data, f, indent=4, ensure_ascii=False)
+                self.manager_map = default_data
+            else:
+                with open(MANAGER_DATA_FILE, 'r', encoding='utf-8-sig') as f: self.manager_map = json.load(f)
+            manager_names = ["[Tất cả]"] + sorted(list(self.manager_map.keys()))
+            self.manager_menu.configure(values=manager_names)
+        except Exception as e:
+            self.log_message(f"ERROR: Không thể tải file dữ liệu: {e}")
+            messagebox.showerror("Lỗi Tải Dữ Liệu", f"Không thể đọc file {MANAGER_DATA_FILE}.\nLỗi: {e}")
+            return
+        
+        self.channel_tree.delete(*self.channel_tree.get_children())
+        self.video_tree.delete(*self.video_tree.get_children())
+        self.channel_data_cache.clear()
+        
+        manager_filter = self.manager_var.get()
+        channels_to_display = []
+        if manager_filter == "[Tất cả]":
+            temp_dict = {}
+            for channel_list in self.manager_map.values():
+                for channel_obj in channel_list:
+                    url_key = channel_obj.get("url") if isinstance(channel_obj, dict) else channel_obj
+                    if url_key and url_key not in temp_dict: temp_dict[url_key] = channel_obj
+            channels_to_display = list(temp_dict.values())
+        elif manager_filter in self.manager_map:
+            channels_to_display = self.manager_map[manager_filter]
+
+        for i, channel_entry in enumerate(channels_to_display):
+            iid = str(i)
+            url, category = (channel_entry.get("url"), channel_entry.get("category", "N/A")) if isinstance(channel_entry, dict) else (channel_entry, "N/A")
+            if not url: continue
+            self.channel_data_cache[iid] = {"original_url": url, "category": category} # Pre-cache
+            platform = "TikTok" if "tiktok.com" in url else "YouTube"
+            values = ("", url.split('/')[-1], "Chưa tải", platform, category, "...", "...", "...", "...")
+            self.channel_tree.insert('', 'end', iid=iid, values=values)
+        self.log_message(f"Đã tải {len(self.channel_tree.get_children())} kênh vào danh sách.")
+
+    def open_manager_file(self):
+        self.log_message(f"INFO: Mở file {MANAGER_DATA_FILE}. Hãy nhấn 'Tải Dữ Liệu' sau khi sửa.")
+        try:
+            if sys.platform == "win32": os.startfile(MANAGER_DATA_FILE)
+            elif sys.platform == "darwin": subprocess.call(["open", str(MANAGER_DATA_FILE)])
+            else: subprocess.call(["xdg-open", str(MANAGER_DATA_FILE)])
+        except Exception as e: self.log_message(f"ERROR: Không thể mở file: {e}")
+
+    def start_scan_all_channels(self):
+        iids = self.channel_tree.get_children()
+        if not iids: self.log_message("WARNING: Không có kênh nào trong danh sách để tải."); return
+        self.log_message(f"Bắt đầu chu trình tải dữ liệu cho {len(iids)} kênh...")
+        self.load_button.configure(state="disabled", text="Đang tải...")
+        threading.Thread(target=self._scan_worker, args=(iids,), daemon=True).start()
+
+    def refresh_selected_channel(self): # Sửa lại để không nhận tham số không cần thiết
+        iids = self.channel_tree.selection()
+        if not iids: self.log_message("WARNING: Vui lòng chọn một kênh để tải lại."); return
+        self.log_message(f"Bắt đầu tải lại dữ liệu cho {len(iids)} kênh đã chọn...")
+        threading.Thread(target=self._scan_worker, args=(iids,), daemon=True).start()
+
+    def _scan_worker(self, iids_to_scan):
+        yesterday_str = (datetime.now() - timedelta(days=1)).strftime('%Y%m%d')
+        ydl_opts = {'quiet': True, 'no_warnings': True, 'extract_flat': False, 'playlistend': 20, 'force_generic_extractor': False}
+        if self.use_cookie_var.get() and self.cookie_path_var.get():
+            cookie_file = Path(self.cookie_path_var.get())
+            if cookie_file.exists():
+                ydl_opts['cookiefile'] = str(cookie_file)
+                self.log_message(f"INFO: Đang sử dụng cookie từ: {cookie_file}")
+            else: self.log_message(f"WARNING: File cookie không tồn tại tại: {cookie_file}")
+
+        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+            for iid in iids_to_scan:
+                if iid not in self.channel_data_cache: continue
+                url = self.channel_data_cache[iid].get("original_url")
+                category = self.channel_data_cache[iid].get("category", "N/A")
+                if not url: continue
+                
+                platform = "TikTok" if "tiktok.com" in url else "YouTube"
+                current_values = list(self.channel_tree.item(iid, 'values'))
+                current_values[2] = "Đang tải..."; self.ui_queue.put(("update_channel_row", (iid, tuple(current_values), None)))
+                
+                try:
+                    info = ydl.extract_info(url, download=False)
+                    if not info: self.ui_queue.put(("update_channel_row", (iid, ("Lỗi", url.split('/')[-1], "❌ Lỗi", platform, category, "N/A", "N/A", "N/A", "N/A"), None))); continue
+                    
+                    self.channel_data_cache[iid].update(info)
+                    
+                    channel_thumb_url = info.get('thumbnail')
+                    channel_thumb_img = None
+                    if channel_thumb_url:
+                        try:
+                            res = requests.get(channel_thumb_url, timeout=5)
+                            if res.status_code == 200:
+                                img = Image.open(BytesIO(res.content)).resize((60, 60), Image.LANCZOS)
+                                channel_thumb_img = ImageTk.PhotoImage(img)
+                        except Exception: pass
+                    
+                    channel_name = info.get('channel') or info.get('uploader') or info.get('title', 'N/A')
+                    subs = info.get('subscriber_count') or info.get('follower_count')
+                    likes = info.get('like_count')
+                    video_count = info.get('video_count') or len(info.get('entries', []))
+                    uploaded_yesterday = sum(1 for v in info.get('entries', []) if v and v.get('upload_date') == yesterday_str)
+                    values = ("", channel_name, "✅ Sẵn sàng", platform, category, format_number(subs), format_number(likes), format_number(video_count), uploaded_yesterday)
+                    self.ui_queue.put(("update_channel_row", (iid, values, channel_thumb_img)))
+                except Exception as e:
+                    self.log_message(f"ERROR: Lỗi khi quét kênh {url}: {type(e).__name__}")
+                    current_values[2] = "❌ Lỗi"; self.ui_queue.put(("update_channel_row", (iid, tuple(current_values), None)))
+        
+        if self.load_button.cget('state') == 'disabled': self.ui_queue.put(("scan_finished", None))
+
+    def on_channel_select(self, event):
+        selected_items = self.channel_tree.selection()
+        if not selected_items: return
+        selected_iid = selected_items[0]
+        channel_info = self.channel_data_cache.get(selected_iid)
+        if channel_info and 'entries' in channel_info:
+            video_entries = sorted([v for v in channel_info['entries'] if v], key=lambda x: x.get('view_count', 0), reverse=True)
+            self.ui_queue.put(("populate_video_placeholders", video_entries))
+            threading.Thread(target=self._video_detail_worker, args=(video_entries,), daemon=True).start()
+        else:
+            self.video_tree.delete(*self.video_tree.get_children())
+
+    def _populate_video_list_placeholders(self, video_entries):
+        self.video_tree.delete(*self.video_tree.get_children())
+        self.video_thumbnails.clear()
+        for i, video in enumerate(video_entries):
+            iid = f"video_{i}"
+            title = video.get('title', 'Đang tải...')
+            values = ("", title, "...", "...", "...", "...")
+            self.video_tree.insert('', 'end', iid=iid, values=values)
+
+    def _video_detail_worker(self, video_entries):
+        for i, video in enumerate(video_entries):
+            iid = f"video_{i}"
+            thumbnail_image = None
+            thumb_url = video.get('thumbnail')
+            if thumb_url:
+                try:
+                    res = requests.get(thumb_url, stream=True, timeout=5)
+                    if res.status_code == 200:
+                        img = Image.open(BytesIO(res.content)).resize((120, 67), Image.LANCZOS)
+                        thumbnail_image = ImageTk.PhotoImage(img)
+                except Exception: thumbnail_image = None
+            upload_date = video.get('upload_date')
+            if upload_date:
+                try: upload_date = datetime.strptime(upload_date, '%Y%m%d').strftime('%Y-%m-%d')
+                except ValueError: pass
+            duration = video.get('duration')
+            if duration:
+                try:
+                    secs = int(duration); mins, secs = divmod(secs, 60); hours, mins = divmod(mins, 60)
+                    duration = f"{hours:02}:{mins:02}:{secs:02}" if hours > 0 else f"{mins:02}:{secs:02}"
+                except (ValueError, TypeError): duration = "N/A"
+            values = ("", video.get('title', 'N/A'), format_number(video.get('view_count')), upload_date or 'N/A', duration or 'N/A', format_number(video.get('like_count')))
+            self.ui_queue.put(("update_video_row", (iid, values, thumbnail_image)))
+
+if __name__ == '__main__':
+    if not YT_DLP_AVAILABLE:
+        print("LỖI: Thiếu thư viện. Vui lòng chạy: pip install yt-dlp Pillow requests")
+        sys.exit(1)
+    app = ctk.CTk()
+    app.title("Test ManageChannelTab")
+    app.geometry("1800x900")
+    tab = ManageChannelTab(app)
+    tab.pack(fill="both", expand=True)
+    app.mainloop()

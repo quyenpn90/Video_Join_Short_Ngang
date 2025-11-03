@@ -1,0 +1,16 @@
+{
+    "mode": "sequential",
+    "aspect_ratio_choice": "d",
+    "watermark_text": "Minh Do Anh A",
+    "font_path": "C:\\Video_Join_Short_Ngang\\Video_Join_Short_Ngang\\Font\\segoepr.ttf",
+    "font_name": "segoepr.ttf",
+    "transition": "none",
+    "transition_duration": 0.0,
+    "use_bgm": true,
+    "bgm_paths": [
+        "C:\\Video_Join_Short_Ngang\\Video_Join_Short_Ngang\\Sound_Background\\Rest Your Head Ease Your Mind [0Nn8Pozv84I].MP3"
+    ],
+    "bgm_gain": 0.6991404011461319,
+    "orig_gain": 1.3839541547277938,
+    "num_to_combine": 56767
+}

@@ -1,0 +1,64 @@
+{
+    "Youtube_AI": [
+        {
+            "url": "https://www.youtube.com/@animalkikahaniai",
+            "category": "AI Story"
+        },
+        {
+            "url": "https://www.youtube.com/@NekoFamilyDays",
+            "category": "AI Story"
+        },
+        {
+            "url": "https://www.youtube.com/@mamasphynxstories",
+            "category": "AI Story"
+        },
+        {
+            "url": "https://www.youtube.com/@theendlessjourneyai",
+            "category": "AI Story"
+        }
+    ],
+    "Dang Duc": [
+        {
+            "url": "https://www.tiktok.com/@neko.family.days",
+            "category": "Cat Videos"
+        },
+        {
+            "url": "https://www.tiktok.com/@mama.sphynx.storie",
+            "category": "Cat Videos"
+        },
+        {
+            "url": "https://www.tiktok.com/@animal.ki.kahani",
+            "category": "Animal"
+        },
+        {
+            "url": "https://www.tiktok.com/@everyday.main.char",
+            "category": "General"
+        },
+        {
+            "url": "https://www.tiktok.com/@my.daily.slice",
+            "category": "General"
+        },
+        {
+            "url": "https://www.tiktok.com/@just.another.day753",
+            "category": "General"
+        },
+        {
+            "url": "https://www.tiktok.com/@baby.cat.daily",
+            "category": "Cat Videos"
+        },
+        {
+            "url": "https://www.tiktok.com/@secretatlas99",
+            "category": "General"
+        },
+        {
+            "url": "https://www.tiktok.com/@ziczacbrainrot",
+            "category": "Meme"
+        }
+    ],
+    "Test": [
+        {
+            "url": "https://www.youtube.com/@MrBeast",
+            "category": "Entertainment"
+        }
+    ]
+}
