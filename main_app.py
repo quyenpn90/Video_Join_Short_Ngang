@@ -16,7 +16,7 @@ from Tool import JoinVideoTab, log_queue as jv_log_queue # Import Tab JoinVideo 
 from downloader_tab import DownloaderTab
 # Chừa chỗ import JoinStory sau này
 # from JoinStory import JoinStoryTab # Ví dụ
-
+#test edit source
 class App(ctk.CTk):
     def __init__(self):
         super().__init__()
