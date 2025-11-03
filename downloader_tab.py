@@ -152,97 +152,93 @@ def _parse_vtt_file_to_clean_text(vtt_file_path: str) -> str:
 
 # --- Worker Process (Lấy đầy đủ thông tin) ---
 # Sửa đổi để nhận proxy_url đã được định dạng
-def scan_worker_process(url_list, proxy_url, detail_queue, log_queue, thread_count):
+def scan_worker_process(initial_url_list, proxy_url, detail_queue, log_queue, thread_count):
+    """
+    Worker process được tối ưu hóa để tăng tốc độ quét.
+    - Bước 1: Dùng ThreadPool để lấy danh sách video thô từ TẤT CẢ các URL đầu vào một cách song song.
+    - Bước 2: Dùng ThreadPool để lấy thông tin chi tiết cho TẤT CẢ video đã tìm thấy một cách song song.
+    """
     def log(msg): log_queue.put(msg)
-    def fetch_single_video_details(entry, default_video_type="Video"):
-        video_url_to_fetch = entry.get('webpage_url') or entry.get('original_url') or entry.get('url')
-        if not video_url_to_fetch:
-            log(f"❌ Worker Thread: Không tìm thấy URL trong entry: {entry.get('id') or entry}")
-            raise ValueError("Missing video URL")
-        yt_opts = {
-            'quiet': True, 'no_warnings': True, 'extract_flat': False, 'forcejson': True,
-            'fields': [
-                'id', 'title', 'channel', 'upload_date', 'view_count', 'like_count',
-                'comment_count', 'webpage_url', 'extractor_key', 'filesize_approx', 'duration',
-                'description', 'tags', 'thumbnail', 'language', 'subtitles', 'automatic_captions'
-            ]
-        }
-        # Sử dụng proxy_url đã định dạng
-        if proxy_url: yt_opts['proxy'] = proxy_url
+
+    # Hàm con để lấy danh sách video thô từ một URL
+    def fetch_flat_list(url, ydl_instance):
         try:
-            with yt_dlp.YoutubeDL(yt_opts) as ydl:
-                details = ydl.extract_info(video_url_to_fetch, download=False)
-                # Thêm/Ghi đè 'video_type' vào chi tiết
-                if details:
-                    # Quyết định loại video dựa trên thời lượng nếu là video đơn lẻ
-                    if default_video_type == "Video": # Chỉ kiểm tra nếu nó không phải từ tab /shorts
-                        duration = details.get('duration')
-                        if duration is not None and duration <= 60:
-                            details['video_type'] = "Shorts"
-                        else:
-                            details['video_type'] = "Video"
-                    else: # Nếu nó đến từ tab /shorts, nó là "Shorts"
-                        details['video_type'] = default_video_type
-                return details
+            log(f"Worker: Đang quét URL: {url}")
+            video_type = "Shorts" if url.endswith('/shorts') else "Video"
+            info = ydl_instance.extract_info(url, download=False)
+            if not info: return []
+
+            entries = []
+            if info.get('_type') == 'playlist' or 'entries' in info:
+                if found_entries := info.get('entries'):
+                    for entry in found_entries:
+                        if entry: entry['video_type'] = video_type
+                    entries.extend(filter(None, found_entries))
+            else: # Video đơn lẻ
+                info['video_type'] = video_type
+                entries.append(info)
+            return entries
         except Exception as e:
-            log(f"❌ Worker Thread Lỗi lấy chi tiết URL '{video_url_to_fetch}': {type(e).__name__} - {e}")
-            raise
+            log(f"❌ Worker: Lỗi quét URL: {url} - {e}")
+            return []
+
+    # Hàm con để lấy chi tiết của một video
+    def fetch_video_details(entry, ydl_instance):
+        video_url = entry.get('webpage_url') or entry.get('original_url') or entry.get('url')
+        if not video_url: return None
+        try:
+            details = ydl_instance.extract_info(video_url, download=False)
+            if details:
+                # Ghi đè 'video_type' dựa trên thời lượng nếu là video đơn lẻ và không phải từ tab /shorts
+                if entry.get('video_type') == "Video":
+                    duration = details.get('duration')
+                    details['video_type'] = "Shorts" if duration is not None and duration <= 60 else "Video"
+                else:
+                    details['video_type'] = entry.get('video_type', 'Video')
+            return details
+        except Exception as e:
+            log(f"❌ Worker Thread Lỗi lấy chi tiết URL '{video_url}': {type(e).__name__}")
+            return None
 
     try:
-        ydl_opts_flat = {'quiet': True, 'extract_flat': 'in_playlist', 'force_generic_extractor': False}
-        # Sử dụng proxy_url đã định dạng
-        if proxy_url: ydl_opts_flat['proxy'] = proxy_url
-        global_entry_offset = 0
-        total_videos_fetched_details = 0
-        processed_urls = set()
+        # --- Bước 1: Lấy danh sách video thô song song ---
+        log("Bước 1: Lấy danh sách video thô từ các nguồn...")
+        all_entries = []
+        ydl_opts_flat = {'quiet': True, 'extract_flat': 'in_playlist', 'force_generic_extractor': False, 'proxy': proxy_url}
+        with yt_dlp.YoutubeDL(ydl_opts_flat) as ydl_flat:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count, thread_name_prefix='FlatList') as executor:
+                future_to_url = {executor.submit(fetch_flat_list, url, ydl_flat): url for url in initial_url_list}
+                for future in concurrent.futures.as_completed(future_to_url):
+                    all_entries.extend(future.result())
 
-        with yt_dlp.YoutubeDL(ydl_opts_flat) as ydl:
-            for url in url_list:
-                if url in processed_urls: continue
-                processed_urls.add(url)
-                log(f"Worker: Đang quét URL: {url}")
+        if not all_entries:
+            log("⚠️ Không tìm thấy video nào từ các link đã cho."); return
 
-                # --- LOGIC MỚI: XÁC ĐỊNH LOẠI VIDEO ---
-                video_type = "Video" # Mặc định
-                if url.endswith('/shorts'):
-                    video_type = "Shorts"
-                # --- KẾT THÚC LOGIC MỚI ---
+        # Loại bỏ các video trùng lặp dựa trên ID
+        unique_entries = list({entry['id']: entry for entry in all_entries if entry.get('id')}.values())
+        log(f"Bước 1 hoàn tất: Tìm thấy tổng cộng {len(unique_entries)} video (sau khi loại bỏ trùng lặp).")
+        detail_queue.put(("POPULATE_APPEND", unique_entries))
 
-                current_channel_entries = []
-                try:
-                    info = ydl.extract_info(url, download=False)
-                    if not info: continue
-                    if info.get('_type') == 'playlist' or 'entries' in info:
-                        if entries := info.get('entries'):
-                            for entry in entries: # Thêm loại video vào từng entry
-                                if entry: entry['video_type'] = video_type
-                            current_channel_entries.extend(filter(None, entries))
-                        else: continue
-                    else: # Là video đơn lẻ
-                        info['video_type'] = video_type # Sẽ được kiểm tra lại bằng duration sau
-                        current_channel_entries.append(info)
-                except Exception as e: log(f"❌ Worker: Lỗi quét URL: {url} - {e}"); continue
-                if not current_channel_entries: continue
+        # --- Bước 2: Lấy thông tin chi tiết song song ---
+        log("Bước 2: Bắt đầu lấy thông tin chi tiết...")
+        ydl_opts_details = {
+            'quiet': True, 'no_warnings': True, 'extract_flat': False, 'forcejson': True, 'proxy': proxy_url,
+            'fields': ['id', 'title', 'channel', 'upload_date', 'view_count', 'like_count', 'comment_count',
+                       'webpage_url', 'extractor_key', 'filesize_approx', 'duration', 'description', 'tags',
+                       'thumbnail', 'language', 'subtitles', 'automatic_captions']
+        }
+        total_fetched_count = 0
+        with yt_dlp.YoutubeDL(ydl_opts_details) as ydl_details:
+            with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count, thread_name_prefix='Details') as executor:
+                future_to_index = {executor.submit(fetch_video_details, entry, ydl_details): i for i, entry in enumerate(unique_entries)}
+                for future in concurrent.futures.as_completed(future_to_index):
+                    index = future_to_index[future]
+                    video_details = future.result()
+                    if video_details:
+                        detail_queue.put(("UPDATE", (str(index), video_details)))
+                    total_fetched_count += 1
+                    log_queue.put(f"PROGRESS:{total_fetched_count}")
 
-                detail_queue.put(("POPULATE_APPEND", current_channel_entries))
-                log(f"Worker: Tìm thấy {len(current_channel_entries)} video. Đang lấy chi tiết...")
-
-                with concurrent.futures.ThreadPoolExecutor(max_workers=thread_count) as executor:
-                    future_to_entry = {
-                        # Truyền video_type mặc định vào hàm fetch
-                        executor.submit(fetch_single_video_details, entry, entry.get('video_type', 'Video')): (i + global_entry_offset, entry)
-                        for i, entry in enumerate(current_channel_entries) if entry
-                    }
-                    for future in concurrent.futures.as_completed(future_to_entry):
-                        index, entry = future_to_entry[future]
-                        try:
-                            video_details = future.result()
-                            if video_details: detail_queue.put(("UPDATE", (str(index), video_details)))
-                        except Exception: pass
-                        finally:
-                            total_videos_fetched_details += 1
-                            log_queue.put(f"PROGRESS:{total_videos_fetched_details}")
-                global_entry_offset += len(current_channel_entries)
         log(f"✅ Worker: Hoàn thành quét tất cả URL.")
     except Exception as e: log(f"❌ Worker: Lỗi nghiêm trọng: {e}")
     finally: detail_queue.put(("FINISH_SCAN", None))
